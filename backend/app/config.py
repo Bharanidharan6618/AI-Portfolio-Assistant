@@ -40,7 +40,7 @@ def get_settings() -> Settings:
 
     return Settings(
         gemini_api_key=api_key,
-        gemini_model=os.getenv("GEMINI_MODEL", "gemini-3.7-flash").strip(),
+        gemini_model=os.getenv("GEMINI_MODEL", "gemini-3.8-flash").strip(),
         max_question_length=int(os.getenv("MAX_QUESTION_LENGTH", "500")),
         gemini_timeout_seconds=int(os.getenv("GEMINI_TIMEOUT_SECONDS", "30")),
         knowledge_file=BASE_DIR / "app" / "data" / "portfolio_knowledge.txt",
