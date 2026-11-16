@@ -137,6 +137,18 @@ class KnowledgeService:
     @property
     def chunk_count(self) -> int:
         return len(self._chunks)
+    
+    @property
+    def section_titles(self) -> list[str]:
+        """Headings found in the portfolio document, in order."""
+        titles: list[str] = []
+        for chunk in self._chunks:
+            first_line = chunk.text.split("\n", 1)[0].strip()
+            if _is_heading(first_line):
+                title = first_line.rstrip(":").strip()
+                if title and title not in titles:
+                    titles.append(title)
+        return titles
 
     def search(self, question: str, top_k: int = DEFAULT_TOP_K) -> list[str]:
         """Return the best-matching chunks (best first). Empty list if none."""
