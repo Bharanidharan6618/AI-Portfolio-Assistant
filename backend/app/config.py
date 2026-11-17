@@ -21,6 +21,7 @@ DEFAULT_ORIGINS = "http://localhost:5500,http://127.0.0.1:5500,http://localhost:
 class Settings:
     gemini_api_key: str
     gemini_model: str
+    gemini_fallback_model: str
     max_question_length: int
     gemini_timeout_seconds: int
     knowledge_file: Path
@@ -63,6 +64,7 @@ def get_settings() -> Settings:
     return Settings(
         gemini_api_key=api_key,
         gemini_model=os.getenv("GEMINI_MODEL", "gemini-3.8-flash").strip(),
+        gemini_fallback_model=os.getenv("GEMINI_FALLBACK_MODEL","").strip(),
         max_question_length=_int_env("MAX_QUESTION_LENGTH", 500),
         gemini_timeout_seconds=_int_env("GEMINI_TIMEOUT_SECONDS", 30),
         knowledge_file=BASE_DIR / "app" / "data" / "portfolio_knowledge.txt",

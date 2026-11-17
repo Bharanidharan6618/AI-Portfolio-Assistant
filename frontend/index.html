@@ -810,168 +810,224 @@ form.addEventListener('submit', (e) => {
 </script>
 
 <script>
-    /* ============================================================
-       AI PORTFOLIO ASSISTANT (chatbot)
-       Wrapped in a function so its variables cannot clash with the
-       portfolio script above (which already uses names like "form").
-       ============================================================ */
-    (function () {
-      'use strict';
-    
-      // ---------- Text shown to visitors ----------
-      const WELCOME_TEXT =
-        "Hi! I'm the AI Portfolio Assistant. Ask me about Bharanidharan's skills, " +
-        "projects, internship experience, education or contact details.";
-    
-      // Friendly messages. Only 'not-connected' is used now;
-      // the others are for the backend integration step.
-      const ERROR_TEXT = {
-        'not-connected': "The assistant isn't connected to its server yet. Please check back soon.",
-        'network': "I couldn't reach the server. Check your connection and try again.",
-        'rate-limit': "Too many questions at once. Wait a moment and try again.",
-        'server': "Something went wrong on my side. Please try again shortly."
-      };
-    
-      // ---------- Page elements ----------
-      const root = document.getElementById('ai-chatbot');
-      const toggleBtn = document.getElementById('ai-chatbot-toggle');
-      const closeBtn = document.getElementById('ai-chatbot-close');
-      const windowEl = document.getElementById('ai-chatbot-window');
-      const messagesEl = document.getElementById('ai-chatbot-messages');
-      const formEl = document.getElementById('ai-chatbot-form');
-      const inputEl = document.getElementById('ai-chatbot-input');
-      const sendBtn = document.getElementById('ai-chatbot-send');
-      if (!root || !toggleBtn || !closeBtn || !windowEl || !messagesEl || !formEl || !inputEl || !sendBtn) return;
-    
-      let isOpen = false;
-      let isLoading = false;
-    
-      // ---------- Backend request (NOT connected yet) ----------
-      class ChatError extends Error {
-        constructor(kind) { super(kind); this.kind = kind; }
+  /* ============================================================
+     AI PORTFOLIO ASSISTANT (chatbot)
+     Wrapped in a function so its variables cannot clash with the
+     portfolio script above (which already uses names like "form").
+     ============================================================ */
+  (function () {
+    'use strict';
+  
+    // ---------- Backend settings ----------
+    // While testing, the page talks to your local FastAPI server. For the
+    // deployed site, put your Render URL in PRODUCTION_API_URL (no trailing
+    // slash) during the deployment step. Until then, the live site shows a
+    // friendly "not available" message instead of calling anything.
+    const PRODUCTION_API_URL = '';
+    const LOCAL_API_URL = 'http://127.0.0.1:8000';
+    const isLocalPage = ['localhost', '127.0.0.1'].includes(window.location.hostname);
+    const API_BASE_URL = isLocalPage ? LOCAL_API_URL : PRODUCTION_API_URL;
+    const CHAT_ENDPOINT = API_BASE_URL + '/api/chat';
+    // Longer than the backend's own limit (about 65 s), so the backend's
+    // friendly timeout message arrives before the browser gives up.
+    const REQUEST_TIMEOUT_MS = 70000;
+  
+    // ---------- Text shown to visitors ----------
+    const WELCOME_TEXT =
+      "Hi! I'm the AI Portfolio Assistant. Ask me about Bharanidharan's skills, " +
+      "projects, internship experience, education or contact details.";
+  
+    const ERROR_TEXT = {
+      'not-connected': "The assistant isn't available on this site yet. Please check back soon.",
+      'network': "I couldn't reach the assistant. Check your connection and try again.",
+      'timeout': "The assistant took too long to answer. Please try again.",
+      'invalid': "That message couldn't be sent. Please keep it between 1 and 500 characters.",
+      'rate-limit': "Too many questions at once. Wait a moment and try again.",
+      'server': "Something went wrong on my side. Please try again shortly."
+    };
+  
+    // ---------- Page elements ----------
+    const root = document.getElementById('ai-chatbot');
+    const toggleBtn = document.getElementById('ai-chatbot-toggle');
+    const closeBtn = document.getElementById('ai-chatbot-close');
+    const windowEl = document.getElementById('ai-chatbot-window');
+    const messagesEl = document.getElementById('ai-chatbot-messages');
+    const formEl = document.getElementById('ai-chatbot-form');
+    const inputEl = document.getElementById('ai-chatbot-input');
+    const sendBtn = document.getElementById('ai-chatbot-send');
+    if (!root || !toggleBtn || !closeBtn || !windowEl || !messagesEl || !formEl || !inputEl || !sendBtn) return;
+  
+    let isOpen = false;
+    let isLoading = false;
+  
+    // ---------- Backend request ----------
+    class ChatError extends Error {
+      constructor(kind, serverMessage) {
+        super(kind);
+        this.kind = kind;
+        this.serverMessage = serverMessage || '';
       }
-    
-      // The next integration step replaces the body of this function with a
-      // fetch() call to the FastAPI backend and returns the answer text.
-      // Until then it reports "not connected" instead of faking an AI reply.
-      async function requestAnswer(question) {
-        // To preview the loading dots, temporarily uncomment the next line:
-        // await new Promise(function (resolve) { setTimeout(resolve, 2000); });
-        throw new ChatError('not-connected');
+    }
+  
+    // Turn an HTTP status code into one of our error kinds.
+    function kindFromStatus(status) {
+      if (status === 429) return 'rate-limit';
+      if (status === 400 || status === 411 || status === 413 || status === 422) return 'invalid';
+      return 'server';
+    }
+  
+    // Sends the question to POST /api/chat and returns the answer text.
+    async function requestAnswer(question) {
+      if (!API_BASE_URL) throw new ChatError('not-connected');
+  
+      const controller = new AbortController();
+      const timer = setTimeout(function () { controller.abort(); }, REQUEST_TIMEOUT_MS);
+  
+      let response;
+      try {
+        response = await fetch(CHAT_ENDPOINT, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ question: question }),
+          signal: controller.signal
+        });
+      } catch (error) {
+        throw new ChatError(error && error.name === 'AbortError' ? 'timeout' : 'network');
+      } finally {
+        clearTimeout(timer);
       }
-    
-      function friendlyError(error) {
-        return ERROR_TEXT[error && error.kind] || ERROR_TEXT.server;
+  
+      let data = null;
+      try { data = await response.json(); } catch (error) { /* body was not JSON */ }
+  
+      if (!response.ok) {
+        throw new ChatError(kindFromStatus(response.status), data && data.detail);
       }
-    
-      // ---------- Safe message rendering (textContent only, never innerHTML) ----------
-      function addMessage(role, text) {
-        const row = document.createElement('div');
-        row.className = 'ai-chatbot-row ai-chatbot-row--' + role;
-        const bubble = document.createElement('div');
-        bubble.className = 'ai-chatbot-bubble ai-chatbot-bubble--' + role;
-        bubble.textContent = text;
-        row.appendChild(bubble);
-        messagesEl.appendChild(row);
-        scrollToBottom();
-        return row;
+      if (!data || typeof data.answer !== 'string' || data.answer.trim() === '') {
+        throw new ChatError('server');
       }
-    
-      function showTyping() {
-        const row = document.createElement('div');
-        row.className = 'ai-chatbot-row ai-chatbot-row--assistant';
-        const bubble = document.createElement('div');
-        bubble.className = 'ai-chatbot-bubble ai-chatbot-bubble--assistant ai-chatbot-typing';
-        bubble.setAttribute('role', 'status');
-        bubble.setAttribute('aria-label', 'The assistant is typing');
-        for (let i = 0; i < 3; i++) {
-          const dot = document.createElement('span');
-          dot.className = 'ai-chatbot-dot';
-          bubble.appendChild(dot);
-        }
-        row.appendChild(bubble);
-        messagesEl.appendChild(row);
-        scrollToBottom();
-        return row;
+      return data.answer.trim();
+    }
+  
+    // For server-side problems (rate limit, Gemini down, daily limit) the
+    // backend's own "detail" text is already written for visitors and contains
+    // no internal details, so we show it. Everything else uses our local text.
+    function friendlyError(error) {
+      if (error && typeof error.serverMessage === 'string' && error.serverMessage &&
+          (error.kind === 'server' || error.kind === 'rate-limit')) {
+        return error.serverMessage;
       }
-    
-      function scrollToBottom() {
-        messagesEl.scrollTop = messagesEl.scrollHeight;
+      return ERROR_TEXT[error && error.kind] || ERROR_TEXT.server;
+    }
+  
+    // ---------- Safe message rendering (textContent only, never innerHTML) ----------
+    function addMessage(role, text) {
+      const row = document.createElement('div');
+      row.className = 'ai-chatbot-row ai-chatbot-row--' + role;
+      const bubble = document.createElement('div');
+      bubble.className = 'ai-chatbot-bubble ai-chatbot-bubble--' + role;
+      bubble.textContent = text;
+      row.appendChild(bubble);
+      messagesEl.appendChild(row);
+      scrollToBottom();
+      return row;
+    }
+  
+    function showTyping() {
+      const row = document.createElement('div');
+      row.className = 'ai-chatbot-row ai-chatbot-row--assistant';
+      const bubble = document.createElement('div');
+      bubble.className = 'ai-chatbot-bubble ai-chatbot-bubble--assistant ai-chatbot-typing';
+      bubble.setAttribute('role', 'status');
+      bubble.setAttribute('aria-label', 'The assistant is typing');
+      for (let i = 0; i < 3; i++) {
+        const dot = document.createElement('span');
+        dot.className = 'ai-chatbot-dot';
+        bubble.appendChild(dot);
       }
-    
-      // ---------- Input state ----------
-      function updateSendState() {
-        sendBtn.disabled = isLoading || inputEl.value.trim() === '';
-      }
-    
-      function setLoading(value) {
-        isLoading = value;
-        inputEl.readOnly = value;        // readOnly keeps the phone keyboard open
-        root.setAttribute('aria-busy', String(value));
-        updateSendState();
-      }
-    
-      // ---------- Open / close ----------
-      function openChat() {
-        isOpen = true;
-        root.classList.add('is-open');
-        toggleBtn.setAttribute('aria-expanded', 'true');
-        toggleBtn.setAttribute('aria-label', 'Close AI Portfolio Assistant');
-        // Only auto-focus with a mouse; on phones it would pop the keyboard open.
-        if (window.matchMedia('(pointer: fine)').matches) {
-          setTimeout(function () { inputEl.focus(); }, 50);
-        }
-      }
-    
-      function closeChat() {
-        const focusWasInside = windowEl.contains(document.activeElement);
-        isOpen = false;
-        root.classList.remove('is-open');
-        toggleBtn.setAttribute('aria-expanded', 'false');
-        toggleBtn.setAttribute('aria-label', 'Open AI Portfolio Assistant');
-        if (focusWasInside) toggleBtn.focus();
-      }
-    
-      // ---------- Sending a question ----------
-      async function handleSend() {
-        const question = inputEl.value.trim();
-        if (isLoading || question === '') return;
-    
-        addMessage('user', question);
-        inputEl.value = '';
-        setLoading(true);
-        const typingRow = showTyping();
-    
-        try {
-          const answer = await requestAnswer(question);
-          typingRow.remove();
-          addMessage('assistant', answer);
-        } catch (error) {
-          typingRow.remove();
-          addMessage('error', friendlyError(error));
-        } finally {
-          setLoading(false);
-          if (isOpen) inputEl.focus();
-        }
-      }
-    
-      // ---------- Events (each registered once) ----------
-      toggleBtn.addEventListener('click', function () { isOpen ? closeChat() : openChat(); });
-      closeBtn.addEventListener('click', closeChat);
-      inputEl.addEventListener('input', updateSendState);
-      formEl.addEventListener('submit', function (event) {
-        event.preventDefault();   // Enter key and the send button both end up here
-        handleSend();
-      });
-      windowEl.addEventListener('keydown', function (event) {
-        if (event.key === 'Escape') closeChat();
-      });
-    
-      // ---------- Start ----------
-      addMessage('assistant', WELCOME_TEXT);
+      row.appendChild(bubble);
+      messagesEl.appendChild(row);
+      scrollToBottom();
+      return row;
+    }
+  
+    function scrollToBottom() {
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+    }
+  
+    // ---------- Input state ----------
+    function updateSendState() {
+      sendBtn.disabled = isLoading || inputEl.value.trim() === '';
+    }
+  
+    function setLoading(value) {
+      isLoading = value;
+      inputEl.readOnly = value;        // readOnly keeps the phone keyboard open
+      root.setAttribute('aria-busy', String(value));
       updateSendState();
-    })();
-    </script>
+    }
+  
+    // ---------- Open / close ----------
+    function openChat() {
+      isOpen = true;
+      root.classList.add('is-open');
+      toggleBtn.setAttribute('aria-expanded', 'true');
+      toggleBtn.setAttribute('aria-label', 'Close AI Portfolio Assistant');
+      // Only auto-focus with a mouse; on phones it would pop the keyboard open.
+      if (window.matchMedia('(pointer: fine)').matches) {
+        setTimeout(function () { inputEl.focus(); }, 50);
+      }
+    }
+  
+    function closeChat() {
+      const focusWasInside = windowEl.contains(document.activeElement);
+      isOpen = false;
+      root.classList.remove('is-open');
+      toggleBtn.setAttribute('aria-expanded', 'false');
+      toggleBtn.setAttribute('aria-label', 'Open AI Portfolio Assistant');
+      if (focusWasInside) toggleBtn.focus();
+    }
+  
+    // ---------- Sending a question ----------
+    async function handleSend() {
+      const question = inputEl.value.trim();
+      if (isLoading || question === '') return;
+  
+      addMessage('user', question);
+      inputEl.value = '';
+      setLoading(true);
+      const typingRow = showTyping();
+  
+      try {
+        const answer = await requestAnswer(question);
+        typingRow.remove();
+        addMessage('assistant', answer);
+      } catch (error) {
+        typingRow.remove();
+        addMessage('error', friendlyError(error));
+      } finally {
+        setLoading(false);
+        if (isOpen) inputEl.focus();
+      }
+    }
+  
+    // ---------- Events (each registered once) ----------
+    toggleBtn.addEventListener('click', function () { isOpen ? closeChat() : openChat(); });
+    closeBtn.addEventListener('click', closeChat);
+    inputEl.addEventListener('input', updateSendState);
+    formEl.addEventListener('submit', function (event) {
+      event.preventDefault();   // Enter key and the send button both end up here
+      handleSend();
+    });
+    windowEl.addEventListener('keydown', function (event) {
+      if (event.key === 'Escape') closeChat();
+    });
+  
+    // ---------- Start ----------
+    addMessage('assistant', WELCOME_TEXT);
+    updateSendState();
+  })();
+  </script>
 
 </body>
 </html>

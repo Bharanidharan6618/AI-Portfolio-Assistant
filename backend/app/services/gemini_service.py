@@ -25,6 +25,9 @@ NOT_FOUND_MESSAGE = "Sorry, I don't have that information in my portfolio."
 CACHE_TTL_SECONDS = 3600
 CACHE_MAX_ITEMS = 200
 
+# If the main model fails with one of these, the fallback model is tried.
+FALLBACK_STATUS_CODES = (502, 503, 504)
+
 SYSTEM_INSTRUCTION = f"""\
 You are the AI assistant on a developer's personal portfolio website. Your only \
 job is to answer recruiter and visitor questions about the portfolio owner's \
@@ -112,25 +115,28 @@ def _translate_api_error(exc: errors.APIError) -> GeminiServiceError:
 class GeminiService:
     def __init__(self) -> None:
         settings = get_settings()
-        self._model = settings.gemini_model
+
+        # Main model first, then the optional fallback model.
+        self._models = [settings.gemini_model]
+        fallback = settings.gemini_fallback_model
+        if fallback and fallback != settings.gemini_model:
+            self._models.append(fallback)
+
         self._max_question_length = settings.max_question_length
         self._secrets = (settings.gemini_api_key,)
         self._cache = TTLCache(CACHE_MAX_ITEMS, CACHE_TTL_SECONDS)
         self._daily_counter = DailyCounter(settings.daily_gemini_limit)
 
         timeout_seconds = settings.gemini_timeout_seconds
-        # Outer safety limit: two attempts plus a small buffer.
-        self._hard_timeout = timeout_seconds * 2 + 5
+        # Outer safety limit for one model call.
+        self._hard_timeout = timeout_seconds + 5
 
         self._client = genai.Client(
             api_key=settings.gemini_api_key,
             http_options=types.HttpOptions(
                 timeout=timeout_seconds * 1000,  # the SDK expects milliseconds
-                retry_options=types.HttpRetryOptions(
-                    attempts=2,
-                    # 429 is deliberately NOT retried, to protect your quota.
-                    http_status_codes=[500, 502, 503, 504],
-                ),
+                # One attempt per model: the fallback model is our retry.
+                retry_options=types.HttpRetryOptions(attempts=1),
             ),
         )
         self._config = types.GenerateContentConfig(
@@ -139,6 +145,34 @@ class GeminiService:
             max_output_tokens=2048,
             thinking_config=types.ThinkingConfig(thinking_level="low"),
         )
+
+    async def _call_model(self, model: str, prompt: str) -> str:
+        """Ask one model. Returns its text, or raises GeminiServiceError."""
+        try:
+            response = await asyncio.wait_for(
+                self._client.aio.models.generate_content(
+                    model=model,
+                    contents=prompt,
+                    config=self._config,
+                ),
+                timeout=self._hard_timeout,
+            )
+        except (asyncio.TimeoutError, httpx.TimeoutException) as exc:
+            logger.error("Gemini request timed out (%s): %s", model, type(exc).__name__)
+            raise GeminiServiceError(
+                "The AI service took too long to respond. Please try again.", 504
+            ) from None
+        except errors.APIError as exc:
+            logger.error("Model that failed: %s", model)
+            raise _translate_api_error(exc) from None
+        except httpx.HTTPError as exc:
+            logger.error(
+                "Network error contacting Gemini (%s): %s", model, type(exc).__name__
+            )
+            raise GeminiServiceError(
+                "Could not reach the AI service. Please try again.", 502
+            ) from None
+        return (response.text or "").strip()
 
     async def generate_answer(self, question: str, context: str) -> str:
         """Answer a visitor question using only the given portfolio context."""
@@ -162,7 +196,7 @@ class GeminiService:
             logger.info("Answer served from cache.")
             return cached
 
-        # Layer 4: global daily cap on real Gemini calls.
+        # Layer 4: global daily cap on real Gemini calls (one per question).
         if not self._daily_counter.try_increment():
             logger.warning("Daily Gemini call limit reached.")
             raise GeminiServiceError(
@@ -172,29 +206,23 @@ class GeminiService:
                 retry_after=self._daily_counter.seconds_until_reset(),
             )
 
-        try:
-            response = await asyncio.wait_for(
-                self._client.aio.models.generate_content(
-                    model=self._model,
-                    contents=_build_prompt(question, context),
-                    config=self._config,
-                ),
-                timeout=self._hard_timeout,
-            )
-        except (asyncio.TimeoutError, httpx.TimeoutException) as exc:
-            logger.error("Gemini request timed out: %s", type(exc).__name__)
-            raise GeminiServiceError(
-                "The AI service took too long to respond. Please try again.", 504
-            ) from None
-        except errors.APIError as exc:
-            raise _translate_api_error(exc) from None
-        except httpx.HTTPError as exc:
-            logger.error("Network error contacting Gemini: %s", type(exc).__name__)
-            raise GeminiServiceError(
-                "Could not reach the AI service. Please try again.", 502
-            ) from None
+        # Try the main model; if Google is overloaded or slow, try the fallback.
+        prompt = _build_prompt(question, context)
+        text = ""
+        for position, model in enumerate(self._models):
+            try:
+                text = await self._call_model(model, prompt)
+                break
+            except GeminiServiceError as exc:
+                is_last = position == len(self._models) - 1
+                if is_last or exc.status_code not in FALLBACK_STATUS_CODES:
+                    raise
+                logger.warning(
+                    "Model %s failed (status %s). Trying the fallback model.",
+                    model,
+                    exc.status_code,
+                )
 
-        text = (response.text or "").strip()
         if not text:
             logger.warning("Gemini returned an empty response.")
             return NOT_FOUND_MESSAGE
