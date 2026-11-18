@@ -819,18 +819,19 @@ form.addEventListener('submit', (e) => {
     'use strict';
   
     // ---------- Backend settings ----------
-    // While testing, the page talks to your local FastAPI server. For the
-    // deployed site, put your Render URL in PRODUCTION_API_URL (no trailing
-    // slash) during the deployment step. Until then, the live site shows a
-    // friendly "not available" message instead of calling anything.
-    const PRODUCTION_API_URL = '';
+    // On localhost the page talks to your local FastAPI server.
+    // On the live site it talks to the Render backend.
+    const PRODUCTION_API_URL = 'https://ai-portfolio-assistant-ds0j.onrender.com';
     const LOCAL_API_URL = 'http://127.0.0.1:8000';
     const isLocalPage = ['localhost', '127.0.0.1'].includes(window.location.hostname);
     const API_BASE_URL = isLocalPage ? LOCAL_API_URL : PRODUCTION_API_URL;
     const CHAT_ENDPOINT = API_BASE_URL + '/api/chat';
-    // Longer than the backend's own limit (about 65 s), so the backend's
-    // friendly timeout message arrives before the browser gives up.
-    const REQUEST_TIMEOUT_MS = 70000;
+    // Long enough for Render's free instance to wake up (about a minute)
+    // plus the backend's own time limits.
+    const REQUEST_TIMEOUT_MS = 120000;
+    // If an answer is slow, show a hint after this many milliseconds.
+    const SLOW_HINT_DELAY_MS = 8000;
+    const SLOW_HINT_TEXT = 'Waking up the assistant... the first answer can take up to a minute.';
   
     // ---------- Text shown to visitors ----------
     const WELCOME_TEXT =
@@ -855,10 +856,13 @@ form.addEventListener('submit', (e) => {
     const formEl = document.getElementById('ai-chatbot-form');
     const inputEl = document.getElementById('ai-chatbot-input');
     const sendBtn = document.getElementById('ai-chatbot-send');
+    const noteEl = root ? root.querySelector('.ai-chatbot-note') : null;
     if (!root || !toggleBtn || !closeBtn || !windowEl || !messagesEl || !formEl || !inputEl || !sendBtn) return;
   
+    const DEFAULT_NOTE = noteEl ? noteEl.textContent : '';
     let isOpen = false;
     let isLoading = false;
+    let hasWokenBackend = false;
   
     // ---------- Backend request ----------
     class ChatError extends Error {
@@ -920,6 +924,14 @@ form.addEventListener('submit', (e) => {
       return ERROR_TEXT[error && error.kind] || ERROR_TEXT.server;
     }
   
+    // Wakes the backend (Render's free instance sleeps when idle). Fire and
+    // forget: we don't need the reply, so CORS and errors don't matter here.
+    function wakeBackend() {
+      if (hasWokenBackend || !API_BASE_URL) return;
+      hasWokenBackend = true;
+      fetch(API_BASE_URL + '/health', { mode: 'no-cors', cache: 'no-store' }).catch(function () {});
+    }
+  
     // ---------- Safe message rendering (textContent only, never innerHTML) ----------
     function addMessage(role, text) {
       const row = document.createElement('div');
@@ -955,6 +967,10 @@ form.addEventListener('submit', (e) => {
       messagesEl.scrollTop = messagesEl.scrollHeight;
     }
   
+    function setNote(text) {
+      if (noteEl) noteEl.textContent = text;
+    }
+  
     // ---------- Input state ----------
     function updateSendState() {
       sendBtn.disabled = isLoading || inputEl.value.trim() === '';
@@ -973,6 +989,7 @@ form.addEventListener('submit', (e) => {
       root.classList.add('is-open');
       toggleBtn.setAttribute('aria-expanded', 'true');
       toggleBtn.setAttribute('aria-label', 'Close AI Portfolio Assistant');
+      wakeBackend();
       // Only auto-focus with a mouse; on phones it would pop the keyboard open.
       if (window.matchMedia('(pointer: fine)').matches) {
         setTimeout(function () { inputEl.focus(); }, 50);
@@ -997,6 +1014,7 @@ form.addEventListener('submit', (e) => {
       inputEl.value = '';
       setLoading(true);
       const typingRow = showTyping();
+      const slowTimer = setTimeout(function () { setNote(SLOW_HINT_TEXT); }, SLOW_HINT_DELAY_MS);
   
       try {
         const answer = await requestAnswer(question);
@@ -1006,6 +1024,8 @@ form.addEventListener('submit', (e) => {
         typingRow.remove();
         addMessage('error', friendlyError(error));
       } finally {
+        clearTimeout(slowTimer);
+        setNote(DEFAULT_NOTE);
         setLoading(false);
         if (isOpen) inputEl.focus();
       }
